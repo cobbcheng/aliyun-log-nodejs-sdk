@@ -1,16 +1,33 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterAll, beforeEach, describe, expect, it, vi } from 'vitest';
 
-const { mockRequest, mockRead } = vi.hoisted(() => ({
-  mockRequest: vi.fn(),
-  mockRead: vi.fn()
-}));
+const originalFetch = globalThis.fetch;
+const mockFetch = vi.fn();
 
-vi.mock('httpx', () => ({
-  request: mockRequest,
-  read: mockRead
-}));
+const buildResponse = (body: string, headers: Record<string, string> = { 'content-type': 'text/plain' }) => {
+  const normalizedHeaders = Object.fromEntries(
+    Object.entries(headers).map(([key, value]) => [key.toLowerCase(), value])
+  );
 
-import * as kitx from 'kitx';
+  return {
+    headers: {
+      forEach: (callback: (value: string, key: string) => void) => {
+        Object.entries(normalizedHeaders).forEach(([key, value]) => callback(value, key));
+      }
+    },
+    text: vi.fn().mockResolvedValue(body)
+  };
+};
+
+beforeEach(() => {
+  mockFetch.mockReset();
+  globalThis.fetch = mockFetch as typeof fetch;
+});
+
+afterAll(() => {
+  globalThis.fetch = originalFetch;
+});
+
+import { md5 } from '../src/crypto-utils';
 import Client from '../src';
 import IndexClient, { ClientConfig } from '../src/index';
 
@@ -19,11 +36,6 @@ const baseConfig = {
   accessKeySecret: 'test-secret',
   region: 'cn-hangzhou'
 };
-
-beforeEach(() => {
-  mockRequest.mockReset();
-  mockRead.mockReset();
-});
 
 describe('Client constructor', () => {
   it('sets endpoint from region and net', () => {
@@ -236,41 +248,48 @@ describe('Client request handling', () => {
       securityToken: 'token'
     });
 
-    mockRequest.mockResolvedValue({ headers: { 'content-type': 'text/plain' } });
-    mockRead.mockResolvedValue('ok');
+    mockFetch.mockResolvedValue(buildResponse('ok', { 'content-type': 'text/plain' }));
 
     const body = Buffer.from('payload');
     await client._request('POST', 'proj', '/path', {}, body, {}, { timeout: 10 });
 
-    expect(mockRequest).toHaveBeenCalledTimes(1);
-    const [, options] = mockRequest.mock.calls[0];
+    expect(mockFetch).toHaveBeenCalledTimes(1);
+    const [, options] = mockFetch.mock.calls[0];
     const headers = options.headers as Record<string, string | number>;
     expect(headers.authorization).toBe('SIGN');
     expect(headers['x-acs-security-token']).toBe('token');
-    expect(headers['content-md5']).toBe(kitx.md5(body, 'hex').toUpperCase());
-    expect(headers['content-length']).toBe(body.length);
+    expect(headers['content-md5']).toBe(md5(body, 'hex').toUpperCase());
+    expect(headers['content-length']).toBe(String(body.length));
   });
 
   it('handles undefined queries and returns string response', async () => {
     const client = new Client(baseConfig);
     vi.spyOn(client, '_sign').mockReturnValue('SIGN');
-    mockRequest.mockResolvedValue({ headers: { 'content-type': 'text/plain' } });
-    mockRead.mockResolvedValue('plain');
+    mockFetch.mockResolvedValue(buildResponse('plain', { 'content-type': 'text/plain' }));
 
     await expect(
       client._request('GET', 'proj', '/path', undefined as never, null, {}, undefined)
     ).resolves.toBe('plain');
   });
 
+  it('handles responses without a content-type header', async () => {
+    const client = new Client(baseConfig);
+    vi.spyOn(client, '_sign').mockReturnValue('SIGN');
+    mockFetch.mockResolvedValue(buildResponse('no-type', {}));
+
+    await expect(
+      client._request('GET', 'proj', '/path', {}, null, {}, undefined)
+    ).resolves.toBe('no-type');
+  });
+
   it('builds https request without project prefix and with query string', async () => {
     const client = new Client({ ...baseConfig, use_https: true });
     vi.spyOn(client, '_sign').mockReturnValue('SIGN');
-    mockRequest.mockResolvedValue({ headers: {} });
-    mockRead.mockResolvedValue('ok');
+    mockFetch.mockResolvedValue(buildResponse('ok'));
 
     await client._request('GET', undefined, '/path', { a: 1 }, null, {}, undefined);
 
-    const [url] = mockRequest.mock.calls[0];
+    const [url] = mockFetch.mock.calls[0];
     expect(url).toContain('https://');
     expect(url).toContain('/path?a=1');
   });
@@ -278,8 +297,9 @@ describe('Client request handling', () => {
   it('parses JSON response bodies', async () => {
     const client = new Client(baseConfig);
     vi.spyOn(client, '_sign').mockReturnValue('SIGN');
-    mockRequest.mockResolvedValue({ headers: { 'content-type': 'application/json' } });
-    mockRead.mockResolvedValue(JSON.stringify({ ok: true }));
+    mockFetch.mockResolvedValue(
+      buildResponse(JSON.stringify({ ok: true }), { 'content-type': 'application/json' })
+    );
 
     await expect(
       client._request('GET', 'proj', '/path', {}, null, {}, undefined)
@@ -289,14 +309,17 @@ describe('Client request handling', () => {
   it('throws on legacy error response', async () => {
     const client = new Client(baseConfig);
     vi.spyOn(client, '_sign').mockReturnValue('SIGN');
-    mockRequest.mockResolvedValue({
-      headers: { 'content-type': 'application/json', 'x-log-requestid': 'req-1' }
-    });
-    mockRead.mockResolvedValue(
-      JSON.stringify({
-        errorCode: 'Missing',
-        errorMessage: 'not found'
-      })
+    mockFetch.mockResolvedValue(
+      buildResponse(
+        JSON.stringify({
+          errorCode: 'Missing',
+          errorMessage: 'not found'
+        }),
+        {
+          'content-type': 'application/json',
+          'x-log-requestid': 'req-1'
+        }
+      )
     );
 
     await expect(
@@ -311,15 +334,17 @@ describe('Client request handling', () => {
   it('throws on nested Error response', async () => {
     const client = new Client(baseConfig);
     vi.spyOn(client, '_sign').mockReturnValue('SIGN');
-    mockRequest.mockResolvedValue({ headers: { 'content-type': 'application/json' } });
-    mockRead.mockResolvedValue(
-      JSON.stringify({
-        Error: {
-          Message: 'bad',
-          Code: 'Bad',
-          RequestId: 'req-2'
-        }
-      })
+    mockFetch.mockResolvedValue(
+      buildResponse(
+        JSON.stringify({
+          Error: {
+            Message: 'bad',
+            Code: 'Bad',
+            RequestId: 'req-2'
+          }
+        }),
+        { 'content-type': 'application/json' }
+      )
     );
 
     await expect(
@@ -329,6 +354,38 @@ describe('Client request handling', () => {
       code: 'Bad',
       requestid: 'req-2'
     });
+  });
+
+  it('supports timeout and abort signal options', async () => {
+    const client = new Client(baseConfig);
+    vi.spyOn(client, '_sign').mockReturnValue('SIGN');
+    vi.useFakeTimers();
+    try {
+      const controller = new AbortController();
+      mockFetch.mockImplementation((_, init) => {
+        return new Promise((_resolve, reject) => {
+          init?.signal?.addEventListener(
+            'abort',
+            () => {
+              reject(new Error('aborted'));
+            },
+            { once: true }
+          );
+        });
+      });
+
+      const requestPromise = client._request('GET', 'proj', '/path', {}, null, {}, {
+        timeout: 10,
+        signal: controller.signal
+      });
+
+      requestPromise.catch(() => undefined);
+      await vi.advanceTimersByTimeAsync(20);
+      controller.abort();
+      await expect(requestPromise).rejects.toThrow(/aborted/);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
 

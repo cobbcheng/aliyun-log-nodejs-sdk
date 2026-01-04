@@ -3,9 +3,8 @@ import path from 'path';
 import querystring, { ParsedUrlQueryInput } from 'querystring';
 
 import debugFactory from 'debug';
-import * as httpx from 'httpx';
-import * as kitx from 'kitx';
 import * as protobuf from 'protobufjs';
+import { md5, sha1 } from './crypto-utils';
 
 export interface Credentials {
   accessKeyId: string;
@@ -26,8 +25,8 @@ export interface ClientConfig extends Partial<Credentials> {
   endpoint?: string;
 }
 
-export interface RequestOptions {
-  [key: string]: unknown;
+export interface RequestOptions extends RequestInit {
+  timeout?: number;
 }
 
 export interface LogContent {
@@ -206,23 +205,61 @@ class Client {
     }
 
     if (body) {
-      assert(Buffer.isBuffer(body), 'body must be buffer');
-      mergedHeaders['content-md5'] = kitx.md5(body, 'hex').toUpperCase();
-      mergedHeaders['content-length'] = body.length;
-    }
+    assert(Buffer.isBuffer(body), 'body must be buffer');
+    mergedHeaders['content-md5'] = md5(body, 'hex').toUpperCase();
+    mergedHeaders['content-length'] = body.length;
+  }
 
     const sign = this._sign(verb, resourcePath, requestQueries, mergedHeaders, credentials);
     mergedHeaders.authorization = sign;
 
-    const response = await httpx.request(url, {
-      method: verb,
-      data: body,
-      headers: mergedHeaders,
-      ...options
+    const fetchHeaders: Record<string, string> = {};
+    Object.entries(mergedHeaders).forEach(([key, value]) => {
+      fetchHeaders[key] = String(value);
     });
 
-    let responseBody: unknown = await httpx.read(response, 'utf8');
-    const contentType = response.headers['content-type'] || '';
+    const { timeout, signal, ...fetchInit } = options ?? {};
+    let timeoutId: ReturnType<typeof setTimeout> | undefined;
+    let abortController: AbortController | undefined;
+
+    if (typeof timeout === 'number') {
+      abortController = new AbortController();
+      timeoutId = setTimeout(() => {
+        abortController?.abort();
+      }, timeout);
+    }
+
+    if (signal && abortController) {
+      signal.addEventListener(
+        'abort',
+        () => {
+          abortController?.abort();
+        },
+        { once: true }
+      );
+    }
+
+    const requestInit = {
+      ...fetchInit,
+      method: verb,
+      headers: fetchHeaders,
+      body: body ?? undefined,
+      signal: abortController?.signal ?? signal
+    } as RequestInit;
+
+    const response = await fetch(url, requestInit);
+
+    if (timeoutId) {
+      clearTimeout(timeoutId);
+    }
+
+    const responseHeaders: Record<string, string> = {};
+    response.headers.forEach((value, key) => {
+      responseHeaders[key.toLowerCase()] = value;
+    });
+
+    let responseBody: unknown = await response.text();
+    const contentType = responseHeaders['content-type'] || '';
 
     if (contentType.startsWith('application/json')) {
       responseBody = JSON.parse(responseBody as string);
@@ -237,7 +274,7 @@ class Client {
       const typedBody = responseBody as { errorCode: string; errorMessage: string };
       const err = new Error(typedBody.errorMessage);
       (err as Error & { code?: string }).code = typedBody.errorCode;
-      (err as Error & { requestid?: string }).requestid = response.headers['x-log-requestid'];
+      (err as Error & { requestid?: string }).requestid = responseHeaders['x-log-requestid'];
       err.name = `${typedBody.errorCode}Error`;
       throw err;
     }
@@ -274,7 +311,7 @@ class Client {
     const canonicalizedResource = getCanonicalizedResource(resourcePath, queries);
     const signString = `${verb}\n${contentMD5}\n${contentType}\n${date}\n${canonicalizedHeaders}${canonicalizedResource}`;
     debug('signString: %s', signString);
-    const signature = kitx.sha1(signString, credentials.accessKeySecret, 'base64');
+    const signature = sha1(signString, credentials.accessKeySecret, 'base64');
 
     return `LOG ${credentials.accessKeyId}:${signature}`;
   }

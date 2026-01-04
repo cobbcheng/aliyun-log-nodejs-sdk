@@ -14,8 +14,8 @@ export interface ClientConfig extends Partial<Credentials> {
     use_https?: boolean;
     endpoint?: string;
 }
-export interface RequestOptions {
-    [key: string]: unknown;
+export interface RequestOptions extends RequestInit {
+    timeout?: number;
 }
 export interface LogContent {
     [key: string]: string;

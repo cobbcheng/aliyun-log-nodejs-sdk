@@ -40,9 +40,8 @@ const assert_1 = __importDefault(require("assert"));
 const path_1 = __importDefault(require("path"));
 const querystring_1 = __importDefault(require("querystring"));
 const debug_1 = __importDefault(require("debug"));
-const httpx = __importStar(require("httpx"));
-const kitx = __importStar(require("kitx"));
 const protobuf = __importStar(require("protobufjs"));
+const crypto_utils_1 = require("./crypto-utils");
 const debug = (0, debug_1.default)('log:client');
 const root = protobuf.loadSync(path_1.default.join(__dirname, './sls.proto'));
 const LogProto = root.lookupType('sls.Log');
@@ -149,6 +148,7 @@ class Client {
         return this.validateCredentials(await this.credentialsProvider.getCredentials());
     }
     async _request(verb, projectName, resourcePath, queries, body, headers, options) {
+        var _a;
         const prefix = projectName ? `${projectName}.` : '';
         const requestQueries = queries !== null && queries !== void 0 ? queries : {};
         const suffix = Object.keys(requestQueries).length
@@ -170,19 +170,46 @@ class Client {
         }
         if (body) {
             (0, assert_1.default)(Buffer.isBuffer(body), 'body must be buffer');
-            mergedHeaders['content-md5'] = kitx.md5(body, 'hex').toUpperCase();
+            mergedHeaders['content-md5'] = (0, crypto_utils_1.md5)(body, 'hex').toUpperCase();
             mergedHeaders['content-length'] = body.length;
         }
         const sign = this._sign(verb, resourcePath, requestQueries, mergedHeaders, credentials);
         mergedHeaders.authorization = sign;
-        const response = await httpx.request(url, {
-            method: verb,
-            data: body,
-            headers: mergedHeaders,
-            ...options
+        const fetchHeaders = {};
+        Object.entries(mergedHeaders).forEach(([key, value]) => {
+            fetchHeaders[key] = String(value);
         });
-        let responseBody = await httpx.read(response, 'utf8');
-        const contentType = response.headers['content-type'] || '';
+        const { timeout, signal, ...fetchInit } = options !== null && options !== void 0 ? options : {};
+        let timeoutId;
+        let abortController;
+        if (typeof timeout === 'number') {
+            abortController = new AbortController();
+            timeoutId = setTimeout(() => {
+                abortController === null || abortController === void 0 ? void 0 : abortController.abort();
+            }, timeout);
+        }
+        if (signal && abortController) {
+            signal.addEventListener('abort', () => {
+                abortController === null || abortController === void 0 ? void 0 : abortController.abort();
+            }, { once: true });
+        }
+        const requestInit = {
+            ...fetchInit,
+            method: verb,
+            headers: fetchHeaders,
+            body: body !== null && body !== void 0 ? body : undefined,
+            signal: (_a = abortController === null || abortController === void 0 ? void 0 : abortController.signal) !== null && _a !== void 0 ? _a : signal
+        };
+        const response = await fetch(url, requestInit);
+        if (timeoutId) {
+            clearTimeout(timeoutId);
+        }
+        const responseHeaders = {};
+        response.headers.forEach((value, key) => {
+            responseHeaders[key.toLowerCase()] = value;
+        });
+        let responseBody = await response.text();
+        const contentType = responseHeaders['content-type'] || '';
         if (contentType.startsWith('application/json')) {
             responseBody = JSON.parse(responseBody);
         }
@@ -193,7 +220,7 @@ class Client {
             const typedBody = responseBody;
             const err = new Error(typedBody.errorMessage);
             err.code = typedBody.errorCode;
-            err.requestid = response.headers['x-log-requestid'];
+            err.requestid = responseHeaders['x-log-requestid'];
             err.name = `${typedBody.errorCode}Error`;
             throw err;
         }
@@ -217,7 +244,7 @@ class Client {
         const canonicalizedResource = getCanonicalizedResource(resourcePath, queries);
         const signString = `${verb}\n${contentMD5}\n${contentType}\n${date}\n${canonicalizedHeaders}${canonicalizedResource}`;
         debug('signString: %s', signString);
-        const signature = kitx.sha1(signString, credentials.accessKeySecret, 'base64');
+        const signature = (0, crypto_utils_1.sha1)(signString, credentials.accessKeySecret, 'base64');
         return `LOG ${credentials.accessKeyId}:${signature}`;
     }
     getProject(projectName, options) {
