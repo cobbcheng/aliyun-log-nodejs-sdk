@@ -1,6 +1,6 @@
 {
   "name": "alicloud-log-ts",
-  "version": "2.1.0",
+  "version": "2.1.2",
   "description": "Aliyun Log Service Node.js SDK",
   "main": "index.js",
   "types": "dist/index.d.ts",
@@ -11,7 +11,8 @@
     "build": "tsc && node scripts/copy-proto.js",
     "test": "vitest run --coverage",
     "test:watch": "vitest",
-    "test:upload": "tsx test-log-upload.ts"
+    "test:upload": "tsx test-log-upload.ts",
+    "prepack": "node scripts/copy-proto.js"
   },
   "author": "Jackson Tian",
   "license": "MIT",

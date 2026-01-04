@@ -43,7 +43,46 @@ const debug_1 = __importDefault(require("debug"));
 const protobuf = __importStar(require("protobufjs"));
 const crypto_utils_1 = require("./crypto-utils");
 const debug = (0, debug_1.default)('log:client');
-const root = protobuf.loadSync(path_1.default.join(__dirname, './sls.proto'));
+const PROTO_CONTENT = `package sls;
+
+message Log {
+    required uint32 Time = 1;// UNIX Time Format
+    message Content {
+        required string Key = 1;
+        required string Value = 2;
+    }  
+    repeated Content Contents = 2;
+    optional fixed32 TimeNs = 4;
+}
+
+message LogTag {
+    required string Key = 1;
+    required string Value = 2;
+}
+
+message LogGroup {
+    repeated Log Logs= 1;
+    optional string Reserved = 2; // reserved fields
+    optional string Topic = 3;
+    optional string Source = 4;
+    repeated LogTag LogTags = 6;
+}
+
+message LogGroupList {
+    repeated LogGroup logGroupList = 1;
+}
+`;
+const protoPath = path_1.default.join(__dirname, './sls.proto');
+let root;
+try {
+    root = protobuf.loadSync(protoPath);
+}
+catch (error) {
+    if (error.code !== 'ENOENT') {
+        throw error;
+    }
+    root = protobuf.parse(PROTO_CONTENT).root;
+}
 const LogProto = root.lookupType('sls.Log');
 const LogContentProto = root.lookupType('sls.Log.Content');
 const LogTagProto = root.lookupType('sls.LogTag');
